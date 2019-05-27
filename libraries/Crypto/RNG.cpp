@@ -26,7 +26,9 @@
 #include "Crypto.h"
 #include "utility/ProgMemUtil.h"
 #include <Arduino.h>
-#if defined (__arm__) && defined (__SAM3X8E__)
+#if defined (NRF52840_XXAA) || defined (NRF52832_XXAA)
+#define NRF
+#elif defined (__arm__) && defined (__SAM3X8E__)
 // The Arduino Due does not have any EEPROM natively on the main chip.
 // However, it does have a TRNG and flash memory.
 #define RNG_DUE_TRNG 1
@@ -59,7 +61,8 @@
 //       in your sketch and then comment out the #warning line below.
 #if !defined(RNG_DUE_TRNG) && \
     !defined(RNG_WATCHDOG) && \
-    !defined(RNG_WORD_TRNG)
+    !defined(RNG_WORD_TRNG) && \
+    !defined(NRF)
 #warning "no hardware random number source detected for this platform"
 #endif
 
@@ -275,6 +278,7 @@ RNGClass::RNGClass()
  */
 RNGClass::~RNGClass()
 {
+#if !defined (NRF)
 #if defined(RNG_DUE_TRNG)
     // Disable the TRNG in the Arduino Due.
     REG_TRNG_CR = TRNG_CR_KEY(0x524E47);
@@ -296,6 +300,7 @@ RNGClass::~RNGClass()
 #endif
     clean(block);
     clean(stream);
+#endif // NRF
 }
 
 #if defined(RNG_DUE_TRNG)
@@ -384,6 +389,7 @@ static void eraseAndWriteSeed()
  */
 void RNGClass::begin(const char *tag)
 {
+#if !defined (NRF)
     // Bail out if we have already done this.
     if (initialized)
         return;
@@ -499,6 +505,7 @@ void RNGClass::begin(const char *tag)
     save();
 
     // The RNG has now been initialized.
+#endif // NRF
     initialized = 1;
 }
 
@@ -516,11 +523,13 @@ void RNGClass::begin(const char *tag)
  */
 void RNGClass::addNoiseSource(NoiseSource &source)
 {
+#if !defined (NRF)
     #define MAX_NOISE_SOURCES (sizeof(noiseSources) / sizeof(noiseSources[0]))
     if (count < MAX_NOISE_SOURCES) {
         noiseSources[count++] = &source;
         source.added();
     }
+#endif // NRF
 }
 
 /**
@@ -541,9 +550,11 @@ void RNGClass::addNoiseSource(NoiseSource &source)
  */
 void RNGClass::setAutoSaveTime(uint16_t minutes)
 {
+#if !defined (NRF)
     if (!minutes)
         minutes = 1; // Just in case.
     timeout = ((uint32_t)minutes) * 60000U;
+#endif // NRF
 }
 
 /**
@@ -565,6 +576,23 @@ void RNGClass::setAutoSaveTime(uint16_t minutes)
  */
 void RNGClass::rand(uint8_t *data, size_t len)
 {
+#if defined (NRF)
+    uint32_t res;
+    uint8_t avail;
+    uint8_t *ptr = data;
+    size_t need = len;
+    uint8_t get;
+
+    while(need) {
+    	res = sd_rand_application_bytes_available_get(&avail);
+        if(avail) {
+		get = (avail>need) ? need: avail;
+		res = sd_rand_application_vector_get(ptr, get);
+		ptr+=get;
+		need-=get;
+        }
+    }
+#else // NRF
     // Make sure that the RNG is initialized in case the application
     // forgot to call RNG.begin() at startup time.
     if (!initialized)
@@ -616,6 +644,7 @@ void RNGClass::rand(uint8_t *data, size_t len)
 
     // Force a rekey after every request.
     rekey();
+#endif    // NRF
 }
 
 /**
@@ -659,10 +688,14 @@ void RNGClass::rand(uint8_t *data, size_t len)
  */
 bool RNGClass::available(size_t len) const
 {
+#ifdef NRF
+    return true;	// the SoftDevice produces entropy fast enough
+#else
     if (len >= (RNG_MAX_CREDITS / 8))
         return credits >= RNG_MAX_CREDITS;
     else
         return len <= (credits / 8u);
+#endif
 }
 
 /**
@@ -692,6 +725,7 @@ bool RNGClass::available(size_t len) const
  */
 void RNGClass::stir(const uint8_t *data, size_t len, unsigned int credit)
 {
+#ifndef NRF
     // Increase the entropy credit.
     if ((credit / 8) >= len && len)
         credit = len * 8;
@@ -731,6 +765,7 @@ void RNGClass::stir(const uint8_t *data, size_t len, unsigned int credit)
         firstSave = 0;
         save();
     }
+#endif // NRF
 }
 
 /**
@@ -761,6 +796,7 @@ void RNGClass::stir(const uint8_t *data, size_t len, unsigned int credit)
  */
 void RNGClass::save()
 {
+#ifndef NRF
     // Generate random data from the current state and save
     // that as the seed.  Then force a rekey.
     ++(block[12]);
@@ -793,6 +829,7 @@ void RNGClass::save()
 #endif
     rekey();
     timer = millis();
+#endif // NRF
 }
 
 /**
@@ -803,6 +840,7 @@ void RNGClass::save()
  */
 void RNGClass::loop()
 {
+#ifndef NRF
     // Stir in the entropy from all registered noise sources.
     for (uint8_t posn = 0; posn < count; ++posn)
         noiseSources[posn]->stir();
@@ -890,6 +928,7 @@ void RNGClass::loop()
     // Save the seed if the auto-save timer has expired.
     if ((millis() - timer) >= timeout)
         save();
+#endif // NRF
 }
 
 /**
@@ -913,6 +952,7 @@ void RNGClass::loop()
  */
 void RNGClass::destroy()
 {
+#ifndef NRF
     clean(block);
     clean(stream);
 #if defined(RNG_EEPROM)
@@ -931,6 +971,7 @@ void RNGClass::destroy()
         nvs_close(handle);
     }
 #endif
+#endif // NRF
     initialized = 0;
 }
 
@@ -939,6 +980,7 @@ void RNGClass::destroy()
  */
 void RNGClass::rekey()
 {
+#ifndef NRF
     // Rekey the cipher for the next request by generating a new block.
     // This is intended to make it difficult to wind the random number
     // backwards if the state is captured later.  The first 16 bytes of
@@ -953,6 +995,7 @@ void RNGClass::rekey()
     // then this may not help very much.  It is still necessary to stir in
     // high quality entropy data on a regular basis using stir().
     block[13] ^= micros();
+#endif // NRF
 }
 
 /**
@@ -960,6 +1003,7 @@ void RNGClass::rekey()
  */
 void RNGClass::mixTRNG()
 {
+#ifndef NRF
 #if defined(RNG_DUE_TRNG)
     // Mix in 12 words from the Due's TRNG.
     for (int posn = 0; posn < 12; ++posn) {
@@ -1001,4 +1045,5 @@ void RNGClass::mixTRNG()
         sei();
     }
 #endif
+#endif // NRF
 }
